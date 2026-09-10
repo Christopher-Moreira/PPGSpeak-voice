@@ -277,8 +277,12 @@ func (s *Server) runParticipant(p *Participant) {
 			return
 		}
 		p.logger.Info("inbound media started", "room", p.room.id, "user", p.id, "source", source, "mid", mid, "codec", remote.Codec().MimeType)
+		// Encode identity in BOTH the track id and the stream id (msid). Browsers
+		// assign their own MediaStreamTrack.id to received tracks, so only the
+		// MediaStream.id (event.streams[0].id) is guaranteed to survive across the
+		// peer connection — the browser correlates media by that value.
 		trackID := p.id + "-" + string(source)
-		local, err := webrtc.NewTrackLocalStaticRTP(remote.Codec().RTPCodecCapability, trackID, "media-"+p.id)
+		local, err := webrtc.NewTrackLocalStaticRTP(remote.Codec().RTPCodecCapability, trackID, trackID)
 		if err != nil {
 			return
 		}

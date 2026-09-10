@@ -266,11 +266,15 @@ func dial(url, rawTicket string) (*client, error) {
 	pc.OnTrack(func(remote *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		go func() {
 			if _, _, err := remote.ReadRTP(); err == nil {
-				if _, ok := c.metadata.Load(remote.ID()); !ok {
-					c.received <- "missing-metadata:" + remote.ID()
+				// Correlate by the stream id (msid), mirroring how a browser must
+				// identify forwarded tracks: the received MediaStreamTrack.id is
+				// not guaranteed to survive the peer connection, but the stream id
+				// is. This guards the "<owner>-<source>" identity the client uses.
+				if _, ok := c.metadata.Load(remote.StreamID()); !ok {
+					c.received <- "missing-metadata:" + remote.StreamID()
 					return
 				}
-				c.received <- remote.ID()
+				c.received <- remote.StreamID()
 			}
 		}()
 	})
