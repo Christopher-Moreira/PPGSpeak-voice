@@ -8,7 +8,7 @@ RUN go mod download
 
 FROM base AS dev
 COPY . .
-EXPOSE 8081 50000-50100/udp
+EXPOSE 8081 50000/tcp 50000-50100/udp
 CMD ["go", "run", "./cmd/server"]
 
 FROM base AS build
@@ -18,5 +18,5 @@ RUN CGO_ENABLED=0 GOOS=linux go build -buildvcs=false -trimpath -ldflags="-s -w"
 FROM gcr.io/distroless/static-debian12:nonroot AS prod
 COPY --from=build /out/voice /voice
 USER nonroot:nonroot
-EXPOSE 8081 50000-50100/udp
+EXPOSE 8081 50000/tcp 50000-50100/udp
 ENTRYPOINT ["/voice"]

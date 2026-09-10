@@ -56,6 +56,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	defer server.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -65,7 +66,7 @@ func run() error {
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("voice service listening", "addr", cfg.HTTPAddr, "udp_min", cfg.UDPPortMin, "udp_max", cfg.UDPPortMax)
+		logger.Info("voice service listening", "addr", cfg.HTTPAddr, "udp_min", cfg.UDPPortMin, "udp_max", cfg.UDPPortMax, "ice_tcp_port", cfg.ICETCPPort, "ice_tcp_only", cfg.ICETCPOnly)
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}

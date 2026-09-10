@@ -42,8 +42,13 @@ docker compose exec voice go run ./cmd/smoke --url ws://127.0.0.1:8081/voice/ws
 
 - TCP `8081`: HTTP, health, métricas e signaling WebSocket;
 - UDP `50000-50100`: candidatos ICE/mídia do Pion;
+- TCP `50000`: ICE-TCP passivo, usado pelo TCP Proxy da Railway;
 - `VOICE_PUBLIC_IP`: configure ao publicar o servidor atrás de NAT;
 - `VOICE_STUN_URL` e `VOICE_TURN_URL`: opcionais; localhost/LAN não precisam.
 
-Para Internet pública, configure IP público, TLS/WSS e coturn. O serviço é
-single-node: cada room precisa permanecer inteira em uma instância.
+Na Railway, configure `VOICE_ICE_TCP_PORT=50000` e
+`VOICE_ICE_TCP_ONLY=true`, crie um TCP Proxy nessa porta e deixe as variáveis
+injetadas `RAILWAY_TCP_PROXY_DOMAIN`/`RAILWAY_TCP_PROXY_PORT` anunciarem o
+endpoint público. Em um host com UDP público, use `VOICE_PUBLIC_IP`, TLS/WSS e
+coturn. O serviço é single-node: cada room precisa permanecer inteira em uma
+instância.

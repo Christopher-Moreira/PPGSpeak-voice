@@ -152,7 +152,12 @@ func dial(url, rawTicket string) (*client, error) {
 	if err != nil {
 		return nil, err
 	}
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	settings := webrtc.SettingEngine{}
+	// Browsers can dial passive ICE-TCP candidates. Pion's client defaults to
+	// UDP-only, so explicitly enable active TCP to exercise Railway's TCP Proxy.
+	settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4, webrtc.NetworkTypeTCP4})
+	api := webrtc.NewAPI(webrtc.WithSettingEngine(settings))
+	pc, err := api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		_ = ws.Close()
 		return nil, err

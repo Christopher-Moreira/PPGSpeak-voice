@@ -9,12 +9,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/pion/ice/v4"
 	"github.com/pion/interceptor"
 	"github.com/pion/webrtc/v4"
 
@@ -27,6 +29,7 @@ const maxSignalMessage = 256 << 10
 type Server struct {
 	cfg      config.Config
 	api      *webrtc.API
+	tcpMux   ice.TCPMux
 	manager  *Manager
 	verifier *ticket.Verifier
 	webhooks *webhookClient
@@ -52,9 +55,30 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	if cfg.PublicIP != "" {
 		settings.SetNAT1To1IPs([]string{cfg.PublicIP}, webrtc.ICECandidateTypeHost)
 	}
+	var tcpMux ice.TCPMux
+	if cfg.ICETCPPort != 0 {
+		listener, listenErr := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4zero, Port: int(cfg.ICETCPPort)})
+		if listenErr != nil {
+			return nil, fmt.Errorf("listen ICE TCP: %w", listenErr)
+		}
+		tcpMux = webrtc.NewICETCPMux(nil, listener, 8)
+		if cfg.ICETCPPublicHost != "" {
+			publicIP, resolveErr := resolvePublicIPv4(cfg.ICETCPPublicHost)
+			if resolveErr != nil {
+				_ = tcpMux.Close()
+				return nil, fmt.Errorf("resolve ICE TCP proxy: %w", resolveErr)
+			}
+			settings.SetNAT1To1IPs([]string{publicIP.String()}, webrtc.ICECandidateTypeHost)
+			tcpMux = &publicPortTCPMux{TCPMux: tcpMux, port: int(cfg.ICETCPPublicPort)}
+		}
+		settings.SetICETCPMux(tcpMux)
+		if cfg.ICETCPOnly {
+			settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeTCP4})
+		}
+	}
 
 	server := &Server{
-		cfg: cfg,
+		cfg: cfg, tcpMux: tcpMux,
 		api: webrtc.NewAPI(
 			webrtc.WithMediaEngine(mediaEngine),
 			webrtc.WithInterceptorRegistry(registry),
@@ -68,6 +92,65 @@ func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 		CheckOrigin:      func(r *http.Request) bool { return originAllowed(r.Header.Get("Origin"), cfg.AllowedOrigins) },
 	}
 	return server, nil
+}
+
+// Close releases the shared ICE listener. Peer connections are closed when
+// their WebSocket sessions end during HTTP shutdown.
+func (s *Server) Close() error {
+	if s.tcpMux == nil {
+		return nil
+	}
+	return s.tcpMux.Close()
+}
+
+type publicPortTCPMux struct {
+	ice.TCPMux
+	port int
+}
+
+func (m *publicPortTCPMux) GetConnByUfrag(ufrag string, isIPv6 bool, local net.IP) (net.PacketConn, error) {
+	conn, err := m.TCPMux.GetConnByUfrag(ufrag, isIPv6, local)
+	if err != nil {
+		return nil, err
+	}
+	return &publicPortPacketConn{PacketConn: conn, port: m.port}, nil
+}
+
+func (m *publicPortTCPMux) LocalAddr() net.Addr {
+	if provider, ok := m.TCPMux.(interface{ LocalAddr() net.Addr }); ok {
+		return provider.LocalAddr()
+	}
+	return &net.TCPAddr{IP: net.IPv4zero}
+}
+
+type publicPortPacketConn struct {
+	net.PacketConn
+	port int
+}
+
+func (c *publicPortPacketConn) LocalAddr() net.Addr {
+	if current, ok := c.PacketConn.LocalAddr().(*net.TCPAddr); ok {
+		mapped := *current
+		mapped.Port = c.port
+		return &mapped
+	}
+	return c.PacketConn.LocalAddr()
+}
+
+func resolvePublicIPv4(host string) (net.IP, error) {
+	if parsed := net.ParseIP(host); parsed != nil && parsed.To4() != nil {
+		return parsed.To4(), nil
+	}
+	addresses, err := net.LookupIP(host)
+	if err != nil {
+		return nil, err
+	}
+	for _, address := range addresses {
+		if ipv4 := address.To4(); ipv4 != nil {
+			return ipv4, nil
+		}
+	}
+	return nil, fmt.Errorf("host %q has no IPv4 address", host)
 }
 
 func (s *Server) Routes() http.Handler {
