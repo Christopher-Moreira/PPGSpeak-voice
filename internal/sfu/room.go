@@ -7,8 +7,16 @@ import (
 )
 
 type publishedTrack struct {
-	owner *Participant
-	track *webrtc.TrackLocalStaticRTP
+	owner  *Participant
+	source MediaSource
+	track  *webrtc.TrackLocalStaticRTP
+	ssrc   uint32
+}
+
+func trackKey(ownerID string, source MediaSource) string { return ownerID + "\x00" + string(source) }
+func (t *publishedTrack) key() string                    { return trackKey(t.owner.id, t.source) }
+func (t *publishedTrack) info() TrackInfo {
+	return TrackInfo{ID: t.track.ID(), ParticipantID: t.owner.id, Source: t.source, Kind: t.track.Kind().String()}
 }
 
 type Room struct {
@@ -30,6 +38,15 @@ func newRoom(id string, manager *Manager) *Room {
 func (r *Room) join(p *Participant) (participants []ParticipantInfo, tracks []*publishedTrack, replaced *Participant) {
 	r.mu.Lock()
 	replaced = r.participants[p.id]
+	var replacedKeys []string
+	if replaced != nil {
+		for key, track := range r.tracks {
+			if track.owner == replaced {
+				delete(r.tracks, key)
+				replacedKeys = append(replacedKeys, key)
+			}
+		}
+	}
 	for _, other := range r.participants {
 		if other != replaced {
 			participants = append(participants, ParticipantInfo{ID: other.id, Name: other.name})
@@ -41,15 +58,27 @@ func (r *Room) join(p *Participant) (participants []ParticipantInfo, tracks []*p
 		}
 	}
 	r.participants[p.id] = p
+	peers := make([]*Participant, 0, len(r.participants))
+	for _, peer := range r.participants {
+		if peer != p && peer != replaced {
+			peers = append(peers, peer)
+		}
+	}
 	r.mu.Unlock()
+	for _, peer := range peers {
+		for _, key := range replacedKeys {
+			peer.removeOutbound(key)
+		}
+	}
 	return participants, tracks, replaced
 }
 
-func (r *Room) publish(owner *Participant, track *webrtc.TrackLocalStaticRTP) {
-	key := owner.id
+func (r *Room) publish(owner *Participant, source MediaSource, track *webrtc.TrackLocalStaticRTP, ssrc uint32) {
+	key := trackKey(owner.id, source)
 	r.mu.Lock()
 	previous := r.tracks[key]
-	r.tracks[key] = &publishedTrack{owner: owner, track: track}
+	published := &publishedTrack{owner: owner, source: source, track: track, ssrc: ssrc}
+	r.tracks[key] = published
 	peers := make([]*Participant, 0, len(r.participants))
 	for _, peer := range r.participants {
 		if peer != owner {
@@ -64,18 +93,21 @@ func (r *Room) publish(owner *Participant, track *webrtc.TrackLocalStaticRTP) {
 		}
 	}
 	for _, peer := range peers {
-		peer.addOutbound(key, track)
+		info := published.info()
+		_ = peer.send(serverMessage{Type: "track_published", Track: &info})
+		peer.addOutbound(published)
 	}
 }
 
-func (r *Room) unpublish(owner *Participant) {
+func (r *Room) unpublish(owner *Participant, source MediaSource) {
+	key := trackKey(owner.id, source)
 	r.mu.Lock()
-	current := r.tracks[owner.id]
+	current := r.tracks[key]
 	if current == nil || current.owner != owner {
 		r.mu.Unlock()
 		return
 	}
-	delete(r.tracks, owner.id)
+	delete(r.tracks, key)
 	peers := make([]*Participant, 0, len(r.participants))
 	for _, peer := range r.participants {
 		if peer != owner {
@@ -84,7 +116,9 @@ func (r *Room) unpublish(owner *Participant) {
 	}
 	r.mu.Unlock()
 	for _, peer := range peers {
-		peer.removeOutbound(owner.id)
+		info := current.info()
+		_ = peer.send(serverMessage{Type: "track_unpublished", Track: &info})
+		peer.removeOutbound(key)
 	}
 }
 
@@ -95,8 +129,12 @@ func (r *Room) leave(p *Participant) bool {
 		return false
 	}
 	delete(r.participants, p.id)
-	if current := r.tracks[p.id]; current != nil && current.owner == p {
-		delete(r.tracks, p.id)
+	var removed []*publishedTrack
+	for key, current := range r.tracks {
+		if current.owner == p {
+			delete(r.tracks, key)
+			removed = append(removed, current)
+		}
 	}
 	peers := make([]*Participant, 0, len(r.participants))
 	for _, peer := range r.participants {
@@ -106,7 +144,9 @@ func (r *Room) leave(p *Participant) bool {
 	r.mu.Unlock()
 
 	for _, peer := range peers {
-		peer.removeOutbound(p.id)
+		for _, track := range removed {
+			peer.removeOutbound(track.key())
+		}
 		_ = peer.send(serverMessage{Type: "participant_left", Participant: &ParticipantInfo{ID: p.id, Name: p.name}})
 	}
 	if empty {

@@ -1,4 +1,5 @@
-// Package sfu implements a small audio-only selective forwarding unit.
+// Package sfu implements a small selective forwarding unit for voice, camera,
+// and screen sharing.
 package sfu
 
 import (
@@ -37,14 +38,8 @@ type Server struct {
 
 func NewServer(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	mediaEngine := &webrtc.MediaEngine{}
-	if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
-		RTPCodecCapability: webrtc.RTPCodecCapability{
-			MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2,
-			SDPFmtpLine: "minptime=10;useinbandfec=1",
-		},
-		PayloadType: 111,
-	}, webrtc.RTPCodecTypeAudio); err != nil {
-		return nil, fmt.Errorf("register opus: %w", err)
+	if err := mediaEngine.RegisterDefaultCodecs(); err != nil {
+		return nil, fmt.Errorf("register media codecs: %w", err)
 	}
 	registry := &interceptor.Registry{}
 	if err := webrtc.RegisterDefaultInterceptors(mediaEngine, registry); err != nil {
@@ -126,15 +121,25 @@ func (s *Server) newParticipant(conn *websocket.Conn, claims ticket.Claims) (*Pa
 	if err != nil {
 		return nil, err
 	}
-	if _, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
-		Direction: webrtc.RTPTransceiverDirectionRecvonly,
-	}); err != nil {
-		_ = pc.Close()
-		return nil, err
-	}
 	p := &Participant{
 		id: claims.Subject, name: claims.Name, pc: pc, ws: conn, logger: s.logger,
-		senders: make(map[string]*webrtc.RTPSender),
+		senders: make(map[string]*webrtc.RTPSender), inbound: make(map[MediaSource]*publishedTrack),
+		midSources: make(map[string]MediaSource), sourceMIDs: make(map[MediaSource]string),
+		enabled: make(map[MediaSource]bool),
+	}
+	for _, kind := range []webrtc.RTPCodecType{
+		webrtc.RTPCodecTypeAudio,
+		webrtc.RTPCodecTypeVideo,
+		webrtc.RTPCodecTypeVideo,
+		webrtc.RTPCodecTypeAudio,
+	} {
+		_, addErr := pc.AddTransceiverFromKind(kind, webrtc.RTPTransceiverInit{
+			Direction: webrtc.RTPTransceiverDirectionRecvonly,
+		})
+		if addErr != nil {
+			_ = pc.Close()
+			return nil, addErr
+		}
 	}
 	p.room = s.manager.room(claims.Room)
 	return p, nil
@@ -175,16 +180,30 @@ func (s *Server) runParticipant(p *Participant) {
 			}()
 		}
 	})
-	p.pc.OnTrack(func(remote *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
-		if remote.Kind() != webrtc.RTPCodecTypeAudio || !strings.EqualFold(remote.Codec().MimeType, webrtc.MimeTypeOpus) {
+	p.pc.OnTrack(func(remote *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
+		source, mid, ok := p.sourceFor(receiver)
+		if !ok {
+			p.logger.Warn("ignoring unmapped inbound media", "room", p.room.id, "user", p.id, "track", remote.ID(), "mid", mid, "kind", remote.Kind())
 			return
 		}
-		local, err := webrtc.NewTrackLocalStaticRTP(remote.Codec().RTPCodecCapability, p.id, "voice-"+p.id)
+		if remote.Kind() != source.kind() {
+			p.logger.Warn("ignoring media with mismatched kind", "room", p.room.id, "user", p.id, "source", source, "kind", remote.Kind())
+			return
+		}
+		if remote.Kind() == webrtc.RTPCodecTypeAudio && !strings.EqualFold(remote.Codec().MimeType, webrtc.MimeTypeOpus) {
+			return
+		}
+		p.logger.Info("inbound media started", "room", p.room.id, "user", p.id, "source", source, "mid", mid, "codec", remote.Codec().MimeType)
+		trackID := p.id + "-" + string(source)
+		local, err := webrtc.NewTrackLocalStaticRTP(remote.Codec().RTPCodecCapability, trackID, "media-"+p.id)
 		if err != nil {
 			return
 		}
-		p.room.publish(p, local)
-		defer p.room.unpublish(p)
+		p.setInbound(source, local, uint32(remote.SSRC()))
+		if p.sourceEnabled(source) {
+			p.room.publish(p, source, local, uint32(remote.SSRC()))
+			defer p.room.unpublish(p, source)
+		}
 		for {
 			packet, _, err := remote.ReadRTP()
 			if err != nil {
@@ -200,15 +219,19 @@ func (s *Server) runParticipant(p *Participant) {
 	for _, server := range s.cfg.ICEServers {
 		iceServers = append(iceServers, iceServerJSON{URLs: server.URLs, Username: server.Username, Credential: server.Credential})
 	}
+	trackInfos := make([]TrackInfo, 0, len(tracks))
+	for _, track := range tracks {
+		trackInfos = append(trackInfos, track.info())
+	}
 	if err := p.send(serverMessage{
 		Type: "welcome", Participant: &ParticipantInfo{ID: p.id, Name: p.name},
-		Participants: participants, ICEServers: iceServers,
+		Participants: participants, Tracks: trackInfos, ICEServers: iceServers,
 	}); err != nil {
 		p.Close()
 		return
 	}
 	for _, track := range tracks {
-		p.addOutbound(track.owner.id, track.track)
+		p.addOutbound(track)
 	}
 	p.room.broadcastJoined(p)
 	go func() {
@@ -260,6 +283,12 @@ func (s *Server) runParticipant(p *Participant) {
 			if message.Candidate == nil || p.pc.AddICECandidate(*message.Candidate) != nil {
 				return
 			}
+		case "media_state":
+			if !message.Source.valid() || message.Enabled == nil || message.MID == "" {
+				_ = p.send(serverMessage{Type: "error", Code: "invalid_media_state", Message: "invalid media source state"})
+				continue
+			}
+			p.setSourceEnabled(message.Source, *message.Enabled, message.MID)
 		case "leave":
 			return
 		default:

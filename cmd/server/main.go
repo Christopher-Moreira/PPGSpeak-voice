@@ -1,4 +1,4 @@
-// Command server starts the local Pion audio SFU and signaling server.
+// Command server starts the local Pion media SFU and signaling server.
 package main
 
 import (
