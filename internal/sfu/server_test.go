@@ -41,3 +41,31 @@ func TestMediaSources(t *testing.T) {
 		t.Fatal("unknown source should be rejected")
 	}
 }
+
+func TestDefaultSubscriptionsPreserveVoiceAndRequireScreenOptIn(t *testing.T) {
+	if !defaultSubscribed(MediaSourceMicrophone) {
+		t.Fatal("microphone should be subscribed by default")
+	}
+	if !defaultSubscribed(MediaSourceCamera) {
+		t.Fatal("camera should be subscribed by default")
+	}
+	if defaultSubscribed(MediaSourceScreen) {
+		t.Fatal("screen video should require an explicit subscription")
+	}
+	if defaultSubscribed(MediaSourceScreenAudio) {
+		t.Fatal("screen audio should require an explicit subscription")
+	}
+}
+
+func TestLegacyClientsRemainSubscribedDuringRollingDeploy(t *testing.T) {
+	owner := &Participant{id: "publisher"}
+	screen := &publishedTrack{owner: owner, source: MediaSourceScreen}
+	legacy := &Participant{subscriptions: make(map[string]bool)}
+	if !legacy.wantsTrack(screen) {
+		t.Fatal("legacy clients should keep receiving screen tracks")
+	}
+	current := &Participant{selectiveSubscriptions: true, subscriptions: make(map[string]bool)}
+	if current.wantsTrack(screen) {
+		t.Fatal("current clients should opt in before receiving screen tracks")
+	}
+}

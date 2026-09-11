@@ -3,13 +3,15 @@ package sfu
 import "github.com/pion/webrtc/v4"
 
 type clientMessage struct {
-	Type      string                     `json:"type"`
-	Token     string                     `json:"token,omitempty"`
-	SDP       *webrtc.SessionDescription `json:"sdp,omitempty"`
-	Candidate *webrtc.ICECandidateInit   `json:"candidate,omitempty"`
-	Source    MediaSource                `json:"source,omitempty"`
-	Enabled   *bool                      `json:"enabled,omitempty"`
-	MID       string                     `json:"mid,omitempty"`
+	Type            string                     `json:"type"`
+	ProtocolVersion int                        `json:"protocolVersion,omitempty"`
+	Token           string                     `json:"token,omitempty"`
+	SDP             *webrtc.SessionDescription `json:"sdp,omitempty"`
+	Candidate       *webrtc.ICECandidateInit   `json:"candidate,omitempty"`
+	ParticipantID   string                     `json:"participantId,omitempty"`
+	Source          MediaSource                `json:"source,omitempty"`
+	Enabled         *bool                      `json:"enabled,omitempty"`
+	MID             string                     `json:"mid,omitempty"`
 }
 
 type serverMessage struct {
@@ -20,9 +22,11 @@ type serverMessage struct {
 	Participants []ParticipantInfo          `json:"participants,omitempty"`
 	Track        *TrackInfo                 `json:"track,omitempty"`
 	Tracks       []TrackInfo                `json:"tracks,omitempty"`
+	Enabled      *bool                      `json:"enabled,omitempty"`
 	ICEServers   []iceServerJSON            `json:"iceServers,omitempty"`
 	Code         string                     `json:"code,omitempty"`
 	Message      string                     `json:"message,omitempty"`
+	Capabilities []string                   `json:"capabilities,omitempty"`
 }
 
 type ParticipantInfo struct {

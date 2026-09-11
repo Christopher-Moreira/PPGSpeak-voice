@@ -48,12 +48,12 @@ func (r *Room) join(p *Participant) (participants []ParticipantInfo, tracks []*p
 		}
 	}
 	for _, other := range r.participants {
-		if other != replaced {
+		if other != replaced && other.active.Load() {
 			participants = append(participants, ParticipantInfo{ID: other.id, Name: other.name})
 		}
 	}
 	for _, track := range r.tracks {
-		if track.owner != replaced {
+		if track.owner != replaced && track.owner.active.Load() {
 			tracks = append(tracks, track)
 		}
 	}
@@ -81,7 +81,7 @@ func (r *Room) publish(owner *Participant, source MediaSource, track *webrtc.Tra
 	r.tracks[key] = published
 	peers := make([]*Participant, 0, len(r.participants))
 	for _, peer := range r.participants {
-		if peer != owner {
+		if peer != owner && peer.active.Load() {
 			peers = append(peers, peer)
 		}
 	}
@@ -138,16 +138,23 @@ func (r *Room) leave(p *Participant) bool {
 	}
 	peers := make([]*Participant, 0, len(r.participants))
 	for _, peer := range r.participants {
-		peers = append(peers, peer)
+		if peer.active.Load() {
+			peers = append(peers, peer)
+		}
 	}
 	empty := len(r.participants) == 0
 	r.mu.Unlock()
 
 	for _, peer := range peers {
+		if p.wantsTrack(&publishedTrack{owner: peer, source: MediaSourceScreen}) {
+			r.notifyScreenWatch(peer.id, p, false)
+		}
 		for _, track := range removed {
 			peer.removeOutbound(track.key())
 		}
-		_ = peer.send(serverMessage{Type: "participant_left", Participant: &ParticipantInfo{ID: p.id, Name: p.name}})
+		if p.active.Load() {
+			_ = peer.send(serverMessage{Type: "participant_left", Participant: &ParticipantInfo{ID: p.id, Name: p.name}})
+		}
 	}
 	if empty {
 		r.manager.removeIfEmpty(r)
@@ -159,7 +166,7 @@ func (r *Room) broadcastJoined(p *Participant) {
 	r.mu.RLock()
 	peers := make([]*Participant, 0, len(r.participants))
 	for _, peer := range r.participants {
-		if peer != p {
+		if peer != p && peer.active.Load() {
 			peers = append(peers, peer)
 		}
 	}
@@ -167,6 +174,24 @@ func (r *Room) broadcastJoined(p *Participant) {
 	for _, peer := range peers {
 		_ = peer.send(serverMessage{Type: "participant_joined", Participant: &ParticipantInfo{ID: p.id, Name: p.name}})
 	}
+}
+
+func (r *Room) track(ownerID string, source MediaSource) *publishedTrack {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.tracks[trackKey(ownerID, source)]
+}
+
+func (r *Room) notifyScreenWatch(ownerID string, viewer *Participant, enabled bool) {
+	r.mu.RLock()
+	owner := r.participants[ownerID]
+	r.mu.RUnlock()
+	if owner == nil || !owner.active.Load() || owner == viewer {
+		return
+	}
+	_ = owner.send(serverMessage{
+		Type: "screen_watch", Participant: &ParticipantInfo{ID: viewer.id, Name: viewer.name}, Enabled: &enabled,
+	})
 }
 
 func (r *Room) counts() (participants int) {

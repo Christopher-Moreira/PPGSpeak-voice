@@ -22,15 +22,17 @@ import (
 )
 
 type message struct {
-	Type      string                     `json:"type"`
-	Token     string                     `json:"token,omitempty"`
-	SDP       *webrtc.SessionDescription `json:"sdp,omitempty"`
-	Candidate *webrtc.ICECandidateInit   `json:"candidate,omitempty"`
-	Source    string                     `json:"source,omitempty"`
-	Enabled   *bool                      `json:"enabled,omitempty"`
-	MID       string                     `json:"mid,omitempty"`
-	Track     *trackInfo                 `json:"track,omitempty"`
-	Tracks    []trackInfo                `json:"tracks,omitempty"`
+	Type            string                     `json:"type"`
+	ProtocolVersion int                        `json:"protocolVersion,omitempty"`
+	Token           string                     `json:"token,omitempty"`
+	SDP             *webrtc.SessionDescription `json:"sdp,omitempty"`
+	Candidate       *webrtc.ICECandidateInit   `json:"candidate,omitempty"`
+	ParticipantID   string                     `json:"participantId,omitempty"`
+	Source          string                     `json:"source,omitempty"`
+	Enabled         *bool                      `json:"enabled,omitempty"`
+	MID             string                     `json:"mid,omitempty"`
+	Track           *trackInfo                 `json:"track,omitempty"`
+	Tracks          []trackInfo                `json:"tracks,omitempty"`
 }
 
 type trackInfo struct {
@@ -278,7 +280,7 @@ func dial(url, rawTicket string) (*client, error) {
 			}
 		}()
 	})
-	if err := c.send(message{Type: "join", Token: rawTicket}); err != nil {
+	if err := c.send(message{Type: "join", Token: rawTicket, ProtocolVersion: 2}); err != nil {
 		c.close()
 		return nil, err
 	}
@@ -313,10 +315,12 @@ func (c *client) readSignals() {
 		case "welcome":
 			for _, track := range incoming.Tracks {
 				c.metadata.Store(track.ID, track)
+				c.subscribeVideoPresentation(track)
 			}
 		case "track_published":
 			if incoming.Track != nil {
 				c.metadata.Store(incoming.Track.ID, *incoming.Track)
+				c.subscribeVideoPresentation(*incoming.Track)
 			}
 		case "track_unpublished":
 			if incoming.Track != nil {
@@ -343,6 +347,16 @@ func (c *client) readSignals() {
 			}
 		}
 	}
+}
+
+func (c *client) subscribeVideoPresentation(track trackInfo) {
+	if track.Source != "screen" && track.Source != "screen_audio" {
+		return
+	}
+	enabled := true
+	_ = c.send(message{
+		Type: "subscribe", ParticipantID: track.ParticipantID, Source: track.Source, Enabled: &enabled,
+	})
 }
 
 func (c *client) publishVideo() error {

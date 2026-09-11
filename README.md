@@ -10,13 +10,16 @@ os pacotes RTP aos demais participantes sem decodificar ou reencodar a mídia.
 - validação de tickets JWT curtos emitidos pela API principal;
 - uma `PeerConnection` por participante;
 - slots de publicação para microfone, câmera, tela e áudio da tela;
+- assinatura seletiva de tela/áudio da tela, com eventos de espectadores;
 - rooms em memória e encaminhamento RTP/RTCP, incluindo pedidos de keyframe PLI;
-- eventos de entrada/saída assinados para a API principal;
+- eventos de entrada/saída assinados para a API principal somente após a conexão WebRTC;
 - health checks e métricas Prometheus.
 
 Áudio usa Opus. Vídeo negocia os codecs WebRTC disponíveis entre browser e
-Pion (VP8/H.264/VP9/AV1 conforme suporte). Gravação, simulcast/SVC, controle de
-assinatura por qualidade e escala multi-node ainda não fazem parte desta versão.
+Pion (VP8/H.264/VP9/AV1 conforme suporte). O protocolo v2 mantém clientes antigos
+compatíveis durante deploys graduais: clientes v2 recebem voz/câmera por padrão e
+assinam apresentações sob demanda. Gravação, simulcast/SVC, seleção de camada por
+qualidade e escala multi-node ainda não fazem parte desta versão.
 
 ## Execução isolada
 

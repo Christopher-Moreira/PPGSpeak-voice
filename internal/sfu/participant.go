@@ -20,17 +20,20 @@ type Participant struct {
 	ws     *websocket.Conn
 	logger *slog.Logger
 
-	writeMu    sync.Mutex
-	stateMu    sync.Mutex
-	senders    map[string]*webrtc.RTPSender
-	inbound    map[MediaSource]*publishedTrack
-	enabled    map[MediaSource]bool
-	midSources map[string]MediaSource
-	sourceMIDs map[MediaSource]string
-	pending    bool
-	inOffer    bool
-	closed     atomic.Bool
-	onClose    func()
+	writeMu                sync.Mutex
+	stateMu                sync.Mutex
+	senders                map[string]*webrtc.RTPSender
+	inbound                map[MediaSource]*publishedTrack
+	enabled                map[MediaSource]bool
+	midSources             map[string]MediaSource
+	sourceMIDs             map[MediaSource]string
+	pending                bool
+	inOffer                bool
+	active                 atomic.Bool
+	closed                 atomic.Bool
+	selectiveSubscriptions bool
+	subscriptions          map[string]bool
+	onClose                func()
 }
 
 func (p *Participant) send(message serverMessage) error {
@@ -44,7 +47,7 @@ func (p *Participant) send(message serverMessage) error {
 }
 
 func (p *Participant) addOutbound(published *publishedTrack) {
-	if p.closed.Load() || published.owner.id == p.id {
+	if p.closed.Load() || published.owner.id == p.id || !p.wantsTrack(published) {
 		return
 	}
 	key := published.key()
@@ -64,6 +67,52 @@ func (p *Participant) addOutbound(published *publishedTrack) {
 	}
 	go drainRTCP(sender, published)
 	p.requestNegotiation()
+}
+
+func defaultSubscribed(source MediaSource) bool {
+	return source == MediaSourceMicrophone || source == MediaSourceCamera
+}
+
+func (p *Participant) wantsTrack(published *publishedTrack) bool {
+	if !p.selectiveSubscriptions {
+		return true
+	}
+	key := published.key()
+	p.stateMu.Lock()
+	enabled, exists := p.subscriptions[key]
+	p.stateMu.Unlock()
+	if exists {
+		return enabled
+	}
+	return defaultSubscribed(published.source)
+}
+
+func (p *Participant) setSubscription(participantID string, source MediaSource, enabled bool) {
+	if !p.selectiveSubscriptions || participantID == "" || participantID == p.id {
+		return
+	}
+	key := trackKey(participantID, source)
+	p.stateMu.Lock()
+	previous, exists := p.subscriptions[key]
+	if !exists {
+		previous = defaultSubscribed(source)
+	}
+	p.subscriptions[key] = enabled
+	p.stateMu.Unlock()
+	if previous == enabled {
+		return
+	}
+	track := p.room.track(participantID, source)
+	if enabled {
+		if track != nil {
+			p.addOutbound(track)
+		}
+	} else {
+		p.removeOutbound(key)
+	}
+	if source == MediaSourceScreen {
+		p.room.notifyScreenWatch(participantID, p, enabled)
+	}
 }
 
 func (p *Participant) removeOutbound(key string) {

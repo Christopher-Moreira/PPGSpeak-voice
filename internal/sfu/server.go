@@ -188,7 +188,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		s.rejected.Add(1)
 		return
 	}
-	participant, err := s.newParticipant(conn, claims)
+	participant, err := s.newParticipant(conn, claims, first.ProtocolVersion)
 	if err != nil {
 		_ = conn.WriteJSON(serverMessage{Type: "error", Code: "rtc_setup_failed", Message: "could not create WebRTC transport"})
 		_ = conn.Close()
@@ -199,7 +199,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	s.runParticipant(participant)
 }
 
-func (s *Server) newParticipant(conn *websocket.Conn, claims ticket.Claims) (*Participant, error) {
+func (s *Server) newParticipant(conn *websocket.Conn, claims ticket.Claims, protocolVersion int) (*Participant, error) {
 	pc, err := s.api.NewPeerConnection(webrtc.Configuration{ICEServers: s.cfg.ICEServers})
 	if err != nil {
 		return nil, err
@@ -208,7 +208,8 @@ func (s *Server) newParticipant(conn *websocket.Conn, claims ticket.Claims) (*Pa
 		id: claims.Subject, name: claims.Name, pc: pc, ws: conn, logger: s.logger,
 		senders: make(map[string]*webrtc.RTPSender), inbound: make(map[MediaSource]*publishedTrack),
 		midSources: make(map[string]MediaSource), sourceMIDs: make(map[MediaSource]string),
-		enabled: make(map[MediaSource]bool),
+		enabled: make(map[MediaSource]bool), subscriptions: make(map[string]bool),
+		selectiveSubscriptions: protocolVersion >= 2,
 	}
 	for _, kind := range []webrtc.RTPCodecType{
 		webrtc.RTPCodecTypeAudio,
@@ -234,12 +235,18 @@ func (s *Server) runParticipant(p *Participant) {
 		if !p.room.leave(p) {
 			return
 		}
+		if !p.active.Load() {
+			return
+		}
 		callbackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		s.webhooks.send(callbackCtx, "participant_left", p)
 		s.logger.Info("voice participant left", "room", p.room.id, "user", p.id)
 	}
 	if replaced != nil {
+		if replaced.active.Load() {
+			p.active.Store(true)
+		}
 		replaced.Close()
 	}
 
@@ -252,6 +259,16 @@ func (s *Server) runParticipant(p *Participant) {
 	})
 	p.pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		switch state {
+		case webrtc.PeerConnectionStateConnected:
+			if p.active.CompareAndSwap(false, true) {
+				p.room.broadcastJoined(p)
+				go func() {
+					webhookCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					s.webhooks.send(webhookCtx, "participant_joined", p)
+				}()
+				s.logger.Info("voice participant connected", "room", p.room.id, "user", p.id)
+			}
 		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
 			p.Close()
 		case webrtc.PeerConnectionStateDisconnected:
@@ -313,6 +330,7 @@ func (s *Server) runParticipant(p *Participant) {
 	if err := p.send(serverMessage{
 		Type: "welcome", Participant: &ParticipantInfo{ID: p.id, Name: p.name},
 		Participants: participants, Tracks: trackInfos, ICEServers: iceServers,
+		Capabilities: []string{"selective_subscription", "screen_watch"},
 	}); err != nil {
 		p.Close()
 		return
@@ -320,13 +338,7 @@ func (s *Server) runParticipant(p *Participant) {
 	for _, track := range tracks {
 		p.addOutbound(track)
 	}
-	p.room.broadcastJoined(p)
-	go func() {
-		webhookCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		s.webhooks.send(webhookCtx, "participant_joined", p)
-	}()
-	s.logger.Info("voice participant joined", "room", p.room.id, "user", p.id)
+	s.logger.Info("voice participant negotiating", "room", p.room.id, "user", p.id)
 	p.requestNegotiation()
 
 	_ = p.ws.SetReadDeadline(time.Now().Add(45 * time.Second))
@@ -376,6 +388,12 @@ func (s *Server) runParticipant(p *Participant) {
 				continue
 			}
 			p.setSourceEnabled(message.Source, *message.Enabled, message.MID)
+		case "subscribe":
+			if message.ParticipantID == "" || !message.Source.valid() || message.Enabled == nil {
+				_ = p.send(serverMessage{Type: "error", Code: "invalid_subscription", Message: "invalid media subscription"})
+				continue
+			}
+			p.setSubscription(message.ParticipantID, message.Source, *message.Enabled)
 		case "leave":
 			return
 		default:
